@@ -14,6 +14,64 @@ use umwelt_capture::{CaptureFault, Normaliser};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude");
 
+/// Why a corpus fixture is not something umwelt can produce. Each arm is
+/// asserted against the fixture below, so an entry cannot be parked here
+/// merely to make the inventory assertion pass.
+#[derive(Clone, Copy, PartialEq)]
+enum NotOurs {
+    /// Principle 1: nothing here decides.
+    Decides,
+    /// Principle 5: two verbs, honestly. umwelt offers `interrupt` and
+    /// `steer`; `answer` is a verb it does not offer, and `interrupt()` and
+    /// `steer()` refuse any other kind with `WrongKind`.
+    VerbNotOffered,
+    /// umwelt emits no `run.started` at all — the name appears nowhere in
+    /// its source. The assertion below checks that premise rather than
+    /// trusting it, so the day umwelt does emit one, this fails.
+    NotEmitted,
+}
+
+// CLAUDE.md principle 1: nothing here decides. These decision events belong
+// to the governor, now and later: dossier, blastRadius, optionsRuledOut,
+// recommendedAction, and budget/gate_inconclusive/tripwire kinds express
+// classifications, gates or verdicts that umwelt must never produce.
+//
+// `answer` is a control kind umwelt never requests or applies (principle 5:
+// `interrupt` and `steer` are the only two verbs offered), and `run.started`
+// is an event type umwelt's source never names at all.
+const NOT_PRODUCED_HERE: [(&str, NotOurs); 15] = [
+    ("decision-answered-excuse.json", NotOurs::Decides),
+    ("decision-requested-budget.json", NotOurs::Decides),
+    (
+        "decision-requested-gate-inconclusive.json",
+        NotOurs::Decides,
+    ),
+    (
+        "decision-requested-human-decides-options.json",
+        NotOurs::Decides,
+    ),
+    ("decision-requested-human-decides.json", NotOurs::Decides),
+    ("decision-requested-tripwire.json", NotOurs::Decides),
+    ("decision-requested-unclassified.json", NotOurs::Decides),
+    (
+        "decision-requested-unexplained-write.json",
+        NotOurs::Decides,
+    ),
+    (
+        "decision-answered-excuse-requested-run.json",
+        NotOurs::Decides,
+    ),
+    ("decision-answered-permission.json", NotOurs::Decides),
+    (
+        "decision-answered-permission-timeout.json",
+        NotOurs::Decides,
+    ),
+    ("decision-requested-permission.json", NotOurs::Decides),
+    ("control-requested-answer.json", NotOurs::VerbNotOffered),
+    ("control-applied-answer.json", NotOurs::VerbNotOffered),
+    ("run-started-handoff.json", NotOurs::NotEmitted),
+];
+
 #[test]
 fn corpus_matches_for_file_and_in_memory_sources_and_refuses_unknown_types() {
     let report = walk_corpus(ClaudeNormaliser::new, FIXTURES).expect("Claude corpus must match");
@@ -356,46 +414,102 @@ fn every_seeded_ethogram_corpus_fixture_matches_our_mapped_fields() {
         ),
     ];
 
-    // CLAUDE.md principle 1: nothing here decides. These decision events belong
-    // to the governor, now and later: dossier, blastRadius, optionsRuledOut,
-    // recommendedAction, and budget/gate_inconclusive/tripwire kinds express
-    // classifications, gates or verdicts that umwelt must never produce.
-    const NOT_PRODUCED_HERE: [&str; 8] = [
-        "decision-answered-excuse.json",
-        "decision-requested-budget.json",
-        "decision-requested-gate-inconclusive.json",
-        "decision-requested-human-decides-options.json",
-        "decision-requested-human-decides.json",
-        "decision-requested-tripwire.json",
-        "decision-requested-unclassified.json",
-        "decision-requested-unexplained-write.json",
-    ];
-
-    let fixtures = ethogram_corpus::v1_fixtures();
+    let fixtures = ethogram::v1_fixtures();
     assert_eq!(
         fixtures.len(),
         CORRESPONDING_EVENTS.len() + NOT_PRODUCED_HERE.len(),
         "the ethogram corpus inventory changed; map and review every new fixture"
     );
 
-    for name in NOT_PRODUCED_HERE {
+    // The `control.applied` half of the answer exchange is pinned to the
+    // `control.requested` half also exempted here, by controlId, rather than
+    // to a file name — so look the id up instead of hardcoding it.
+    let answer_control_ids: Vec<String> = NOT_PRODUCED_HERE
+        .iter()
+        .filter(|(_, reason)| *reason == NotOurs::VerbNotOffered)
+        .filter_map(|(name, _)| {
+            let fixture = fixtures
+                .iter()
+                .find(|fixture| fixture.name == *name)
+                .unwrap_or_else(|| panic!("missing exempted ethogram fixture {name:?}"));
+            let event = fixture.parse().expect("parse exempted ethogram fixture");
+            (event.event_type == CONTROL_REQUESTED).then(|| {
+                event.payload["controlId"]
+                    .as_str()
+                    .expect("control.requested controlId")
+                    .to_owned()
+            })
+        })
+        .collect();
+
+    for (name, reason) in NOT_PRODUCED_HERE {
         let fixture = fixtures
             .iter()
             .find(|fixture| fixture.name == name)
             .unwrap_or_else(|| panic!("missing exempted ethogram fixture {name:?}"));
         let event = fixture.parse().expect("parse exempted ethogram fixture");
-        // A future agent.* or control.* fixture cannot be parked in this list
-        // just to make the inventory assertion pass.
+        match reason {
+            NotOurs::Decides => {
+                assert!(
+                    event.event_type.starts_with("decision."),
+                    "exempted fixture {name:?} must have a decision. event type, got {:?}",
+                    event.event_type
+                );
+            }
+            NotOurs::VerbNotOffered => {
+                if event.event_type == CONTROL_REQUESTED {
+                    assert_eq!(
+                        event.payload["kind"], "answer",
+                        "exempted fixture {name:?} must request the \"answer\" control kind"
+                    );
+                } else if event.event_type == CONTROL_APPLIED {
+                    let control_id = event.payload["controlId"]
+                        .as_str()
+                        .expect("control.applied controlId");
+                    assert!(
+                        answer_control_ids.iter().any(|id| id == control_id),
+                        "exempted fixture {name:?} must apply a controlId requested by a \
+                         control.requested fixture also exempted as VerbNotOffered, got {control_id:?}"
+                    );
+                } else {
+                    panic!(
+                        "exempted fixture {name:?} tagged VerbNotOffered must be \
+                         control.requested or control.applied, got {:?}",
+                        event.event_type
+                    );
+                }
+            }
+            NotOurs::NotEmitted => {
+                assert_eq!(
+                    event.event_type, "run.started",
+                    "exempted fixture {name:?} must be run.started"
+                );
+            }
+        }
+    }
+
+    // umwelt emits no run.started at all — the name appears nowhere in its
+    // source. Check that premise directly rather than trusting it, so the
+    // day umwelt does emit one, this fails instead of staying silently
+    // stale. Deliberately crude (a plain substring scan, no comment
+    // stripper): its only job is to fire if the premise stops holding.
+    for path in rust_source_files(&workspace_src_root()) {
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         assert!(
-            event.event_type.starts_with("decision."),
-            "exempted fixture {name:?} must have a decision. event type, got {:?}",
-            event.event_type
+            !contents.contains("RUN_STARTED") && !contents.contains("run.started"),
+            "{} names run.started; umwelt does not emit it (see NotOurs::NotEmitted) — \
+             update the exemption if that has changed",
+            path.display()
         );
     }
 
     let mut compared = 0;
     for fixture in fixtures {
-        if NOT_PRODUCED_HERE.contains(&fixture.name) {
+        if NOT_PRODUCED_HERE
+            .iter()
+            .any(|(name, _)| *name == fixture.name)
+        {
             continue;
         }
         let (_, case, source_file, line_number) = CORRESPONDING_EVENTS
@@ -440,6 +554,44 @@ fn every_seeded_ethogram_corpus_fixture_matches_our_mapped_fields() {
     }
     assert!(compared > 0, "the corpus cross-check must compare fixtures");
     assert_eq!(compared, CORRESPONDING_EVENTS.len());
+}
+
+/// The workspace root, found relative to this crate's manifest — the parent
+/// of `crates/umwelt-capture`.
+fn workspace_src_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("crates")
+}
+
+/// Every `.rs` file under `crates/*/src`, recursively. Test and build-script
+/// sources are out of scope on purpose: CLAUDE.md principle 6's search is
+/// over non-test source, and the fixture-name scan above is itself a test.
+fn rust_source_files(crates_dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(crates_dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", crates_dir.display()))
+    {
+        let crate_dir = entry.expect("crate dir entry").path();
+        let src = crate_dir.join("src");
+        if src.is_dir() {
+            collect_rust_files(&src, &mut files);
+        }
+    }
+    files
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+    {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_rust_files(&path, files);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
 }
 
 fn initialised_normaliser() -> ClaudeNormaliser {
