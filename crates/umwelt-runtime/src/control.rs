@@ -422,6 +422,7 @@ fn requested_draft(payload: ControlRequestedPayload) -> EventDraft {
 /// prose, not a place to smuggle a value that has a typed member. Under principle 2,
 /// excerpt once here at the producer; the sink's `validate` is the second line of
 /// defence. Typed reasons carry no free text and never carry a truncation flag.
+///
 /// `by` is `None`. ethogram defines it as the principal identity that
 /// applied the control — an identity a consumer renders and never
 /// interprets. No applier identity is in scope here and `RunControl` never
