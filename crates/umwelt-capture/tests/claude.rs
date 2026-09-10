@@ -493,7 +493,7 @@ fn every_seeded_ethogram_corpus_fixture_matches_our_mapped_fields() {
     // day umwelt does emit one, this fails instead of staying silently
     // stale. Deliberately crude (a plain substring scan, no comment
     // stripper): its only job is to fire if the premise stops holding.
-    for path in rust_source_files(&workspace_src_root()) {
+    for path in rust_source_files(&umwelt_crates_root()) {
         let contents = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         assert!(
@@ -556,29 +556,55 @@ fn every_seeded_ethogram_corpus_fixture_matches_our_mapped_fields() {
     assert_eq!(compared, CORRESPONDING_EVENTS.len());
 }
 
-/// The workspace root, found relative to this crate's manifest — the parent
-/// of `crates/umwelt-capture`.
-fn workspace_src_root() -> std::path::PathBuf {
+/// The directory holding umwelt's crates: the parent of this crate's own
+/// manifest directory, so it follows the tree wherever it is checked out
+/// rather than counting levels up to a workspace root that may not be ours.
+fn umwelt_crates_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("crates")
+        .parent()
+        .expect("umwelt-capture sits inside a crates directory")
+        .to_path_buf()
 }
 
-/// Every `.rs` file under `crates/*/src`, recursively. Test and build-script
-/// sources are out of scope on purpose: CLAUDE.md principle 6's search is
-/// over non-test source, and the fixture-name scan above is itself a test.
+/// Every `.rs` file under `umwelt-*/src`, recursively. Crates are discovered
+/// rather than listed, so a crate added later is covered without editing this;
+/// the `umwelt-` filter is what keeps the scan on our own code.
+///
+/// Both halves matter. Without discovery this stops covering a new crate
+/// silently. Without the filter it is one directory layout away from scanning
+/// a host workspace's crates — and umwelt is about to be folded into ostrom,
+/// which emits `run.started` in nine files quite legitimately, so an unfiltered
+/// scan would fail this test on someone else's correct code.
+///
+/// Test and build-script sources are out of scope on purpose: the premise
+/// being checked is about what umwelt emits, and a test naming the string is
+/// not umwelt emitting it.
 fn rust_source_files(crates_dir: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
+    let mut scanned = 0;
     for entry in fs::read_dir(crates_dir)
         .unwrap_or_else(|error| panic!("read {}: {error}", crates_dir.display()))
     {
         let crate_dir = entry.expect("crate dir entry").path();
+        if !crate_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("umwelt-"))
+        {
+            continue;
+        }
         let src = crate_dir.join("src");
         if src.is_dir() {
             collect_rust_files(&src, &mut files);
+            scanned += 1;
         }
     }
+    // A scan that reaches nothing passes every assertion made over it. This
+    // floor is what stops the guard going quietly vacuous if the layout moves.
+    assert!(
+        scanned >= 2,
+        "expected to scan every umwelt crate's src tree, scanned {scanned}"
+    );
     files
 }
 
